@@ -215,3 +215,85 @@
     (ok true)
   )
 )
+
+;; AUCTION SYSTEM
+
+;; Create auction listing
+(define-public (create-auction
+    (title (string-ascii 128))
+    (description (string-ascii 512))
+    (reserve-price uint)
+    (auction-blocks uint)
+  )
+  (let (
+      (merchant-brand (unwrap! (map-get? brands tx-sender) ERR_INVALID_BRAND_OWNER))
+      (new-product-id (+ (var-get product-counter) u1))
+      (auction-end (+ stacks-block-height auction-blocks))
+    )
+    ;; Validate auction parameters
+    (asserts! (is-valid-product-title title) ERR_INVALID_INPUT)
+    (asserts! (is-valid-description description) ERR_INVALID_INPUT)
+    (asserts! (>= auction-blocks u144) ERR_INVALID_DURATION)
+    ;; Min ~24 hours
+    (asserts! (> reserve-price u0) ERR_INVALID_PRICE)
+
+    ;; Create product and auction
+    (var-set product-counter new-product-id)
+    (map-set products new-product-id {
+      merchant: tx-sender,
+      title: title,
+      description: description,
+      price-sats: reserve-price,
+      is-available: true,
+      creation-block: stacks-block-height,
+      is-auction-item: true,
+    })
+
+    (ok (map-set auctions new-product-id {
+      expiry-block: auction-end,
+      reserve-price: reserve-price,
+      top-bid: u0,
+      leading-bidder: none,
+      is-live: true,
+    }))
+  )
+)
+
+;; Submit auction bid
+(define-public (submit-bid
+    (product-id uint)
+    (bid-amount uint)
+  )
+  (let (
+      (product-info (unwrap! (map-get? products product-id) ERR_PRODUCT_NOT_FOUND))
+      (auction-info (unwrap! (map-get? auctions product-id) ERR_INVALID_AUCTION))
+    )
+    ;; Validate bid conditions
+    (asserts! (get is-live auction-info) ERR_AUCTION_EXPIRED)
+    (asserts! (< stacks-block-height (get expiry-block auction-info))
+      ERR_AUCTION_EXPIRED
+    )
+    (asserts! (>= bid-amount (get reserve-price auction-info)) ERR_BID_TOO_LOW)
+    (asserts! (> bid-amount (get top-bid auction-info)) ERR_BID_TOO_LOW)
+    (asserts! (>= (stx-get-balance tx-sender) bid-amount)
+      ERR_INSUFFICIENT_BALANCE
+    )
+
+    ;; Refund previous bidder
+    (match (get leading-bidder auction-info)
+      previous-bidder (try! (stx-transfer? (get top-bid auction-info) CONTRACT_OWNER previous-bidder))
+      true
+    )
+
+    ;; Accept new bid
+    (try! (stx-transfer? bid-amount tx-sender CONTRACT_OWNER))
+
+    ;; Update auction state
+    (ok (map-set auctions product-id
+      (merge auction-info {
+        top-bid: bid-amount,
+        leading-bidder: (some tx-sender),
+      })
+    ))
+  )
+)
