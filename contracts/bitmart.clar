@@ -130,3 +130,88 @@
     (is-valid-text desc)
   )
 )
+
+;; BRAND MANAGEMENT
+
+;; Register a new merchant brand
+(define-public (register-brand (brand-name (string-ascii 64)))
+  (begin
+    ;; Validate brand name
+    (asserts! (is-valid-brand-name brand-name) ERR_INVALID_INPUT)
+
+    ;; Create brand record
+    (ok (map-set brands tx-sender {
+      name: brand-name,
+      is-verified: false,
+      registration-block: stacks-block-height,
+    }))
+  )
+)
+
+;; Verify brand (contract owner only)
+(define-public (verify-brand (merchant-address principal))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+
+    (let ((brand-info (unwrap! (map-get? brands merchant-address) ERR_INVALID_BRAND_OWNER)))
+      (ok (map-set brands merchant-address (merge brand-info { is-verified: true })))
+    )
+  )
+)
+
+;; PRODUCT LISTINGS
+
+;; List product for direct sale
+(define-public (list-product
+    (title (string-ascii 128))
+    (description (string-ascii 512))
+    (price-sats uint)
+  )
+  (let (
+      (merchant-brand (unwrap! (map-get? brands tx-sender) ERR_INVALID_BRAND_OWNER))
+      (new-product-id (+ (var-get product-counter) u1))
+    )
+    ;; Validate inputs
+    (asserts! (is-valid-product-title title) ERR_INVALID_INPUT)
+    (asserts! (is-valid-description description) ERR_INVALID_INPUT)
+    (asserts! (> price-sats u0) ERR_INVALID_PRICE)
+
+    ;; Create product listing
+    (var-set product-counter new-product-id)
+    (ok (map-set products new-product-id {
+      merchant: tx-sender,
+      title: title,
+      description: description,
+      price-sats: price-sats,
+      is-available: true,
+      creation-block: stacks-block-height,
+      is-auction-item: false,
+    }))
+  )
+)
+
+;; Purchase product directly
+(define-public (buy-product (product-id uint))
+  (let (
+      (product-info (unwrap! (map-get? products product-id) ERR_PRODUCT_NOT_FOUND))
+      (total-price (get price-sats product-info))
+      (merchant (get merchant product-info))
+      (platform-fee (/ (* total-price (var-get platform-fee-bps)) u10000))
+    )
+    ;; Validate purchase conditions
+    (asserts! (get is-available product-info) ERR_PRODUCT_NOT_FOUND)
+    (asserts! (not (get is-auction-item product-info)) ERR_INVALID_AUCTION)
+    (asserts! (>= (stx-get-balance tx-sender) total-price)
+      ERR_INSUFFICIENT_BALANCE
+    )
+
+    ;; Process payment
+    (try! (stx-transfer? platform-fee tx-sender CONTRACT_OWNER))
+    (try! (stx-transfer? (- total-price platform-fee) tx-sender merchant))
+
+    ;; Mark as sold
+    (map-set products product-id (merge product-info { is-available: false }))
+
+    (ok true)
+  )
+)
